@@ -11,7 +11,6 @@ Environment variables (set in Render or locally):
 
 Run: python main.py
 """
-
 import os
 import json
 import time
@@ -20,11 +19,12 @@ import logging
 from datetime import datetime, timedelta
 
 from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, ParseMode
+    Update, InlineKeyboardMarkup, InlineKeyboardButton
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters, ConversationHandler
+    ContextTypes, MessageHandler, filters
 )
 
 # Try to import SDK
@@ -40,19 +40,16 @@ logging.basicConfig(level=logging.INFO,
 STATE_FILE = "state.json"
 POLL_INTERVAL = 5  # seconds (tune as needed; avoid too aggressive polling)
 
-# Telegram conversation states
-SET_RANGE = 1
-
 # Default config according to your request
 DEFAULT_STATE = {
     "market": {"coin": "USDT", "fiat": "NGN", "side": "BUY", "watch_side": "SELL"},
-    "price_range": {"min": 1400.0, "max": 1455.0},  # will be user-configurable
+    "price_range": {"min": 1400.0, "max": 1455.0},
     "min_buy": 10000,
     "max_buy": 1000000,
     "auto_start": False,
     "bot_running": False,
     "admin_id": int(os.getenv("ADMIN_TELEGRAM_ID", "1378825382")),
-    "history": []  # list of {order_id, ad_id, price, amount, timestamp, details...}
+    "history": []
 }
 
 # Helpers to load/save state
@@ -150,24 +147,19 @@ class BotEngine:
             logging.error("Bybit client not configured")
             return []
         try:
-            # the SDK may provide get_online_ads or get_ads_list with filters; try common names
             for method_name in ("get_online_ads", "get_ads_list", "get_ads", "get_ads_online"):
                 method = getattr(self.client, method_name, None)
                 if method:
                     try:
-                        # common params
                         params = dict(coin=self.state["market"]["coin"],
                                       fiat=self.state["market"]["fiat"],
                                       side=self.state["market"]["watch_side"],
                                       page=1, limit=50)
                         resp = method(**params)
-                        # resp may be dict or list
                         if isinstance(resp, dict):
-                            # find items key
                             items = resp.get("items") or resp.get("data") or resp.get("ads") or resp.get("result")
                             if isinstance(items, list):
                                 return items
-                            # sometimes resp itself is the list
                         elif isinstance(resp, list):
                             return resp
                     except Exception as e:
@@ -185,13 +177,11 @@ class BotEngine:
         if not self.client:
             logging.error("Bybit client not configured for create order")
             return None
-        # prepare common params: advertisementId or adId etc
         ad_id = ad.get("adId") or ad.get("advertisementId") or ad.get("id") or ad.get("ad_id")
         if not ad_id:
             logging.error("ad object missing id: %s", ad)
             return None
         params = {"advertisementId": ad_id, "amount": str(amount_fiat)}
-        # try common SDK methods
         for method_name in ("create_order", "create_buy_order", "create_order_v5", "create_order_v1",
                             "post_order", "place_order"):
             method = getattr(self.client, method_name, None)
@@ -221,37 +211,31 @@ class BotEngine:
                     time.sleep(POLL_INTERVAL)
                     continue
 
-                # iterate ads
                 for ad in ads:
                     try:
-                        # adapt to different ad structures
                         price_str = ad.get("price") or ad.get("unitPrice") or ad.get("rate")
                         if price_str is None:
                             continue
                         price = float(price_str)
                         ad_id = ad.get("adId") or ad.get("advertisementId") or ad.get("id") or str(price) + "_" + str(ad.get("sellerId", ""))
-                        # avoid repeatedly attempting same ad in short time
                         if ad_id in self.seen_ads:
                             continue
 
                         pmin = float(self.state["price_range"]["min"])
                         pmax = float(self.state["price_range"]["max"])
                         if pmin <= price <= pmax:
-                            # amount selection: choose min_buy for now; you can later adjust to randomize
                             amount_fiat = int(self.state.get("min_buy", 10000))
-                            # ensure within ad limits if present
                             ad_min = float(ad.get("minLimit") or ad.get("min") or 0)
                             ad_max = float(ad.get("maxLimit") or ad.get("max") or 1e18)
                             if amount_fiat < ad_min:
                                 amount_fiat = int(ad_min)
                             if amount_fiat > ad_max:
-                                # skip if ad max can't accommodate our min amount
                                 logging.info("Ad %s cannot satisfy amount %s > ad_max %s", ad_id, amount_fiat, ad_max)
                                 continue
-                            # create order
+
                             logging.info("Attempting to create buy order for ad %s at price %s amount %s", ad_id, price, amount_fiat)
                             resp = self.create_buy_order(ad, amount_fiat)
-                            # mark seen and push to history
+
                             ts = datetime.utcnow().isoformat()
                             record = {
                                 "order_response": resp,
@@ -259,41 +243,39 @@ class BotEngine:
                                 "amount": amount_fiat,
                                 "timestamp": ts
                             }
-                            # add to history and save
                             self.state.setdefault("history", []).insert(0, record)
                             prune_history(self.state)
                             save_state(self.state)
 
-                            # notify admin
                             order_id = None
                             if isinstance(resp, dict):
-                                order_id = resp.get("orderId") or resp.get("data", {}).get("orderId") if resp.get("data") else None
+                                order_id = resp.get("orderId") or (resp.get("data") or {}).get("orderId")
                             text = (
                                 f"🔥 <b>New Buy Order Created</b>\n"
                                 f"Coin: {self.state['market']['coin']} / {self.state['market']['fiat']}\n"
                                 f"Ad ID: {ad_id}\n"
                                 f"Price: {price}\n"
                                 f"Amount (fiat): {amount_fiat}\n"
-                                f"Order ID: {order_id or 'N/A'}\n"
-                                f"\nPlease pay the seller outside the platform and click <b>I Have Paid</b> when done."
+                                f"Order ID: {order_id or 'N/A'}\n\n"
+                                f"Please pay the seller outside the platform and click <b>I Have Paid</b> when done."
                             )
-                            # inline buttons: Mark Paid, View Order
                             buttons = InlineKeyboardMarkup([
                                 [InlineKeyboardButton("✅ I Have Paid", callback_data=f"markpaid:{order_id or 'none'}")],
                                 [InlineKeyboardButton("🔍 View Ad", callback_data=f"viewad:{ad_id}")],
                             ])
-                            # send async
                             try:
+                                # schedule a coroutine on the application event loop
                                 self.app.create_task(self.notify_admin(text, buttons=buttons))
                             except Exception as e:
                                 logging.exception("Failed schedule notify task: %s", e)
 
-                            # add to seen set briefly
                             self.seen_ads.add(ad_id)
-                            # limit seen size
                             if len(self.seen_ads) > 1000:
-                                self.seen_ads.pop()
-                        # else skip ad
+                                try:
+                                    self.seen_ads.pop()
+                                except Exception:
+                                    # set.pop() may raise on empty; ignore
+                                    pass
                     except Exception as e:
                         logging.exception("Error processing ad: %s", e)
 
@@ -395,18 +377,23 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("markpaid:"):
         order_id = data.split(":", 1)[1]
-        # call mark_as_paid via SDK
         if not engine.client:
             await query.edit_message_text("Bybit client not configured; cannot mark paid.")
             return
         try:
-            # try different method names
             success = False
             for method_name in ("mark_as_paid", "markOrderPaid", "order_pay", "mark_paid"):
                 method = getattr(engine.client, method_name, None)
                 if method:
                     try:
-                        res = method(order_id=order_id) if method_name != "order_pay" else method(orderId=order_id)
+                        # vary argument style to match possible SDK variants
+                        try:
+                            res = method(order_id=order_id)
+                        except TypeError:
+                            try:
+                                res = method(orderId=order_id)
+                            except TypeError:
+                                res = method(order_id)
                         logging.info("mark paid via %s -> %s", method_name, res)
                         success = True
                         break
@@ -423,7 +410,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("viewad:"):
         ad_id = data.split(":", 1)[1]
-        # find in history
         for item in state.get("history", []):
             if item.get("ad", {}).get("id") == ad_id:
                 await query.edit_message_text(f"Ad details:\n{json.dumps(item.get('ad',{}), indent=2)}")
@@ -470,8 +456,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # try parse min_buy / max_buy single numbers
     if text.isdigit():
         n = int(text)
-        # heuristics: if number is within 1000..20000 maybe min, if >20000 maybe max. But safer: ask user which one they intended.
-        # We'll assume if new number less than or equal to existing max and >=1000 it's min, else if bigger set as max.
         if n <= state.get("max_buy", DEFAULT_STATE["max_buy"]):
             state["min_buy"] = n
             save_state(state)
@@ -497,7 +481,6 @@ def create_app_and_engine():
     state = load_state()
     application = ApplicationBuilder().token(token).build()
     engine = BotEngine(application, state)
-    # store state & engine in bot_data
     application.bot_data["state"] = state
     application.bot_data["engine"] = engine
 
