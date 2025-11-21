@@ -1,0 +1,9 @@
+services:
+  - type: worker
+    name: bybit-p2p-auto-buyer
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    autoDeploy: true
